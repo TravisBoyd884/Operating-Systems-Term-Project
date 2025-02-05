@@ -1,1 +1,1 @@
-# Operating-Systemcs-Term-Project
+# Operating-Systems-Term-Project
