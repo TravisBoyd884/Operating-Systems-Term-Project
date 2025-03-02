@@ -7,6 +7,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// List of blocked system calls
+int blocked_syscalls[] = {
+  SYS_unlink // Delete a file (87)
+  SYS_rmdir // Delete a directory (84)
+}
+
 int main(int argc, char *argv[]) {
   char *filepath = argv[1];
   printf("%s \n", filepath);
