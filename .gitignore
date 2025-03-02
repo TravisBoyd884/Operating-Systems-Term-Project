@@ -1,0 +1,12 @@
+# Build directories
+build/
+bin/
+
+# Claude.md (personal assistant file)
+CLAUDE.md
+
+# System files
+.cache/
+
+# Ignore gitignore itself
+.gitignore
