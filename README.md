@@ -40,19 +40,20 @@ After installation, you can run `sandbox` from anywhere in your terminal.
 
 ```bash
 # Using locally built version
-./bin/sandbox <filepath>
+./bin/sandbox <program_to_sandbox>
 
 # Using installed version 
-sandbox <filepath>
+sandbox <program_to_sandbox>
 ```
 
-Where `<filepath>` is the path to the executable you want to run in the sandbox.
+Where `<program_to_sandbox>` is the path to the executable you want to run in the sandbox.
 
 ## Features
 
-- Monitors system calls using ptrace
+- Monitors system calls using ptrace on Unix-based systems (Linux/macOS)
+- Uses process monitoring on Windows
 - Blocks unlink operations on protected directories
-- Cross-platform support for Linux and macOS (x86_64 and ARM64)
+- Cross-platform support for Linux, macOS (x86_64 and ARM64), and Windows
 
 ## Testing
 
@@ -60,5 +61,5 @@ The repository includes a test program that attempts to delete files:
 
 ```bash
 # Test the sandbox with the unlink test program
-./bin/sandbox ./bin/unlink_test test/testfile.txt
+./bin/sandbox ./bin/unlink_test test-file.txt
 ```

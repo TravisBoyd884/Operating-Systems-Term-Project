@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.10)
 
 # Name of the project
-project(Sandbox)
+project(Sandbox C)
 
 # Set the output directory for binaries during development
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
@@ -14,8 +14,11 @@ if(APPLE)
 elseif(UNIX AND NOT APPLE)
   add_definitions(-DLINUX)
   message(STATUS "Configuring for Linux")
+elseif(WIN32)
+  add_definitions(-DWINDOWS)
+  message(STATUS "Configuring for Windows")
 else()
-  message(FATAL_ERROR "Unsupported platform. This project currently supports only Linux and macOS.")
+  message(FATAL_ERROR "Unsupported platform. This project currently supports Linux, macOS, and Windows.")
 endif()
 
 # Create an executable from the source files

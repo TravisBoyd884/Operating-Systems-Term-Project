@@ -1,7 +1,14 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+  #include <windows.h>
+  #define unlink _unlink
+  #include <io.h>
+#else
+  #include <unistd.h>
+#endif
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
@@ -10,7 +17,7 @@ int main(int argc, char *argv[]) {
   }
   
   const char *filepath = argv[1];
-  printf("%s \n", filepath);
+  printf("Attempting to delete: %s\n", filepath);
 
   // Attempt to delete the file
   int result = unlink(filepath);
@@ -20,6 +27,10 @@ int main(int argc, char *argv[]) {
     return 0;
   } else {
     perror("Error deleting file");
-    return errno;
+    #ifdef _WIN32
+      return GetLastError();
+    #else
+      return errno;
+    #endif
   }
 }
