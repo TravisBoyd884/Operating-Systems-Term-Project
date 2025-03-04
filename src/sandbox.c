@@ -14,7 +14,6 @@
   #include <sys/syscall.h>
   #include <sys/ptrace.h>
   #include <mach/mach.h>
-  // On macOS we need these headers
   #include <mach/thread_status.h>
   #include <mach/machine/thread_status.h>
   #include <libproc.h>
@@ -33,16 +32,13 @@
     #define PT_KILL 8
   #endif
   
-  // These aren't used in macOS, we'll use a different approach
-  #define PT_GETREGS -1
-  #define PT_SETREGS -1
-
   // macOS unlink syscall number
   #define SYS_UNLINK 10
 #elif defined(LINUX)
   #include <sys/reg.h>
   #include <sys/syscall.h>
   #include <sys/user.h>
+  
   // Linux x86_64 unlink syscall number
   #define SYS_UNLINK 87
 #endif
@@ -61,7 +57,6 @@ char* read_string(pid_t child_pid, unsigned long addr) {
     
     errno = 0;
 #if defined(MACOS)
-    // macOS uses PT_READ_D instead of PTRACE_PEEKDATA
     data = ptrace(PT_READ_D, child_pid, (caddr_t)(addr + i), 0);
 #elif defined(LINUX)
     data = ptrace(PTRACE_PEEKDATA, child_pid, addr + i, NULL);
@@ -89,16 +84,35 @@ char* read_string(pid_t child_pid, unsigned long addr) {
   return buffer;
 }
 
+// For macOS: check if a file exists
+int file_exists(const char *filepath) {
+  FILE *file = fopen(filepath, "r");
+  if (file) {
+    fclose(file);
+    return 1;
+  }
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    fprintf(stderr, "Usage: %s <filepath>\n", argv[0]);
+  if (argc < 3) {
+    fprintf(stderr, "Usage: %s <program_to_sandbox> <file_to_protect>\n", argv[0]);
     return 1;
   }
 
-  char *filepath = argv[1];
-  printf("Sandbox monitoring: %s\n", filepath);
+  char *filepath = argv[1];    // Program to run
+  char *protected_file = argv[2]; // File to protect
   
-  // Create child process
+  printf("Sandbox monitoring: %s\n", filepath);
+  printf("Protected file: %s\n", protected_file);
+  
+  // Verify the file exists before we start monitoring
+  if (!file_exists(protected_file)) {
+    fprintf(stderr, "Error: Protected file '%s' does not exist\n", protected_file);
+    return 1;
+  }
+  
+  // Fork a child process
   pid_t child_pid = fork();
   
   if (child_pid == -1) {
@@ -110,15 +124,14 @@ int main(int argc, char *argv[]) {
     // Child process
     
 #if defined(MACOS)
-    // Request to be traced by parent (macOS)
+    // Request to be traced by parent
     if (ptrace(PT_TRACE_ME, 0, (caddr_t)0, 0) == -1) {
-      perror("ptrace traceme (macOS)");
+      perror("ptrace traceme");
       exit(1);
     }
 #elif defined(LINUX)
-    // Request to be traced by parent (Linux)
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
-      perror("ptrace traceme (Linux)");
+      perror("ptrace traceme");
       exit(1);
     }
 #endif
@@ -126,23 +139,20 @@ int main(int argc, char *argv[]) {
     // Stop so parent can set up tracing
     raise(SIGSTOP);
     
-    // Try to run the program specified in argv[1] (when resumed by parent)
-    // First try if it's a full path or in current directory
-    execl(filepath, filepath, argv[2], NULL);
+    // Execute the program that was requested
+    execl(filepath, filepath, protected_file, NULL);
     
-    // If that fails, search in PATH
+    // If execl fails, try to find it in PATH
     if (errno == ENOENT) {
-      // Get the PATH environment variable
       char *path_env = getenv("PATH");
       if (path_env) {
         char *path_copy = strdup(path_env);
         char *dir = strtok(path_copy, ":");
         char full_path[MAX_PATH];
         
-        // Try each directory in PATH
         while (dir != NULL) {
           snprintf(full_path, MAX_PATH, "%s/%s", dir, filepath);
-          execl(full_path, filepath, argv[2], NULL);
+          execl(full_path, filepath, protected_file, NULL);
           dir = strtok(NULL, ":");
         }
         
@@ -150,12 +160,11 @@ int main(int argc, char *argv[]) {
       }
     }
     
-    // Should not reach here unless all exec attempts fail
     perror("execl failed");
     exit(1);
   }
   
-  // Parent process - trace the child
+  // Parent process (sandbox)
   int status;
   
   // Wait for child to stop with SIGSTOP
@@ -167,102 +176,75 @@ int main(int argc, char *argv[]) {
   }
   
 #if defined(MACOS)
-  // macOS doesn't have PTRACE_SETOPTIONS or PTRACE_O_TRACESYSGOOD
-  // Just continue with PT_CONTINUE on macOS
+  // Continue the child process
   if (ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0) == -1) {
-    perror("ptrace continue (macOS)");
+    perror("ptrace continue");
     return 1;
   }
 #elif defined(LINUX)
-  // Set tracing options
+  // Set Linux-specific options
   if (ptrace(PTRACE_SETOPTIONS, child_pid, 0, PTRACE_O_TRACESYSGOOD) == -1) {
-    perror("ptrace setoptions (Linux)");
+    perror("ptrace setoptions");
     return 1;
   }
   
-  // Let the traced process run until the next system call
+  // Continue to the next syscall
   if (ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL) == -1) {
-    perror("ptrace syscall (Linux)");
+    perror("ptrace syscall");
     return 1;
   }
 #endif
   
-  int entering_syscall = TRUE;
-  int should_block = FALSE;
-  
-  // Monitor system calls
+  // Monitor the child process
   while (1) {
-    // Wait for syscall-stop or other events
+    // Wait for the child to stop
     waitpid(child_pid, &status, 0);
     
-    // Check if child has exited
+    // Check if the child has exited
     if (WIFEXITED(status)) {
       printf("Child process exited with status %d\n", WEXITSTATUS(status));
+      
+      // After the child exits, verify the file still exists
+      if (!file_exists(protected_file)) {
+        printf("❌ WARNING: The protected file '%s' was deleted despite the sandbox!\n", protected_file);
+      } else {
+        printf("✅ Protected file '%s' is still intact.\n", protected_file);
+      }
+      
       break;
     }
     
-    // Check if child got a signal
+    // Check if the child was terminated by a signal
     if (WIFSIGNALED(status)) {
-      printf("Child terminated by signal %d\n", WTERMSIG(status));
+      printf("Child process terminated by signal %d\n", WTERMSIG(status));
       break;
     }
     
-#if defined(MACOS)
-    // macOS doesn't use SIGTRAP | 0x80 for syscalls
-    // Just check for SIGTRAP
-    if (!WIFSTOPPED(status) || (WSTOPSIG(status) != SIGTRAP)) {
-      ptrace(PT_STEP, child_pid, (caddr_t)1, 0);
-      continue;
-    }
-#elif defined(LINUX)
-    // If the child was stopped by a signal that's not SIGTRAP+0x80, continue
-    if (!WIFSTOPPED(status) || (WSTOPSIG(status) != (SIGTRAP | 0x80))) {
-      ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL);
-      continue;
-    }
-#endif
-    
-    // Get the registers
-#if defined(MACOS)
-    // macOS doesn't have a straightforward way to get syscall info via ptrace
-    // We'll use a workaround approach for demonstration purposes
-    
-    // In a real implementation, you would use the Mach API or another approach
-    // to get this information. For simplicity, we'll assume it's an unlink syscall
-    // based on the known timing of signals
-    
-    static int syscall_count = 0;
-    syscall_count++;
-    
-    // We'll detect unlink syscalls based on the pattern of signals
-    // This is a simplified approach for demonstration
-    if (entering_syscall && syscall_count % 2 == 1) {
-      // We're estimating this is an unlink syscall based on pattern
-      // In a real implementation, you would properly detect this
+    // Check if the file has already been deleted
+    if (!file_exists(protected_file)) {
+      printf("❌ ALERT: File '%s' has already been deleted! Killing the process.\n", protected_file);
       
-      // Since we can't easily get the exact path on macOS without more complex code,
-      // we'll use argv[2] for the path in this demonstration
-      char* path = argv[2] ? argv[2] : "(unknown)";
-      printf("Unlink syscall detected for: %s\n", path);
+      // Kill the child process
+#if defined(MACOS)
+      ptrace(PT_KILL, child_pid, (caddr_t)0, 0);
 #elif defined(LINUX)
-    struct user_regs_struct regs;
-    if (ptrace(PTRACE_GETREGS, child_pid, NULL, &regs) == -1) {
-      perror("ptrace getregs (Linux)");
-      break;
+      ptrace(PTRACE_KILL, child_pid, NULL, NULL);
+#endif
+      waitpid(child_pid, &status, 0);
+      return 1;
     }
     
-    if (entering_syscall) {
-      // This is a syscall entry
+#if defined(MACOS)
+    // On macOS, we need to be more careful about how we detect and handle unlink operations
+    if (WIFSTOPPED(status)) {
+      int sig = WSTOPSIG(status);
       
-      // Check if it's the unlink syscall
-      if (regs.orig_rax == SYS_UNLINK) {
-        // Get the path argument
-        char* path = read_string(child_pid, regs.rdi);
-        printf("Unlink syscall detected for: %s\n", path);
-#endif
+      // If we get a trap signal, this could be an unlink
+      if (sig == SIGTRAP) {
+        // We can't easily determine which syscall is being made on macOS with ptrace alone,
+        // so we'll ask the user if they want to allow potential file operations
         
-        // Prompt user for permission to delete the file
-        printf("🔔 ALERT: Program is attempting to delete file: %s\n", path);
+        printf("\n🔔 ALERT: Program '%s' might be attempting file operations on '%s'\n", filepath, protected_file);
         printf("Allow this operation? (y/n): ");
         fflush(stdout);
         
@@ -271,68 +253,100 @@ int main(int argc, char *argv[]) {
           response = 'n'; // Default to blocking if read fails
         }
         
+        // Clear any remaining characters in the input buffer
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+        
         if (response == 'y' || response == 'Y') {
-          printf("✅ ALLOWED: User permitted unlink operation\n");
-          should_block = FALSE;
-        } else {
-          printf("🛡️ BLOCKED: User denied unlink operation\n");
-          should_block = TRUE;
+          printf("✅ ALLOWED: User permitted operation\n");
           
-          // Instead of killing the process, we'll let it continue but 
-          // will modify the return value in the syscall exit handling
+          // Continue execution
+          ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
+        } else {
+          printf("🛡️ BLOCKED: User denied operation\n");
+          
+          // Kill the process to prevent any file operations
+          printf("Terminating process to protect the file...\n");
+          ptrace(PT_KILL, child_pid, (caddr_t)0, 0);
+          waitpid(child_pid, &status, 0);
+          printf("Process terminated successfully.\n");
+          
+          // Verify the file is still there
+          if (file_exists(protected_file)) {
+            printf("✅ Protected file '%s' is intact.\n", protected_file);
+          } else {
+            printf("❌ WARNING: The protected file was deleted before we could kill the process!\n");
+          }
+          
+          break;
         }
+      } else if (sig != SIGSTOP) {
+        // Forward any other signals to the child
+        ptrace(PT_CONTINUE, child_pid, (caddr_t)1, sig);
+      } else {
+        // Continue execution for SIGSTOP
+        ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
       }
     } else {
-      // This is a syscall exit
+      // If the child is not stopped, just continue it
+      ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
+    }
+#elif defined(LINUX)
+    // Linux specific code for tracking syscalls
+    if (WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80)) {
+      // This is a syscall-stop
+      struct user_regs_struct regs;
       
-      // If we decided to block this syscall, change the return value to an error
-      if (should_block) {
-        printf("Setting syscall return value to -EPERM (Operation not permitted)\n");
-        
-#if defined(MACOS)
-        // On macOS, we can't easily modify the syscall return value with ptrace alone
-        // We would need to use Mach APIs for this in a real implementation
-        
-        // For demonstration, we'll just note that we want to block it
-        // In a proper implementation, you would use Mach APIs to modify register state
-        printf("Note: On macOS, blocking syscalls requires additional Mach API calls\n");
-        printf("For demonstration purposes, we'll continue but the operation may succeed\n");
-        
-        // In a production implementation, you would use something like:
-        // mach_port_t task;
-        // task_for_pid(mach_task_self(), child_pid, &task);
-        // thread_act_array_t thread_list;
-        // mach_msg_type_number_t thread_count;
-        // task_threads(task, &thread_list, &thread_count);
-        // And then use thread_get_state/thread_set_state
-#elif defined(LINUX)
-        regs.rax = -EPERM;  // Operation not permitted
-        
-        if (ptrace(PTRACE_SETREGS, child_pid, NULL, &regs) == -1) {
-          perror("ptrace setregs (Linux)");
-        } else {
-          printf("Successfully modified syscall return value\n");
-        }
-#endif
-        
-        should_block = FALSE;
+      if (ptrace(PTRACE_GETREGS, child_pid, NULL, &regs) == -1) {
+        perror("ptrace getregs");
+        break;
       }
-    }
-    
-    // Toggle between syscall entry/exit
-    entering_syscall = !entering_syscall;
-    
-#if defined(MACOS)
-    // Continue to the next syscall (macOS)
-    if (ptrace(PT_STEP, child_pid, (caddr_t)1, 0) == -1) {
-      perror("ptrace step (macOS)");
-      break;
-    }
-#elif defined(LINUX)
-    // Continue to the next syscall (Linux)
-    if (ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL) == -1) {
-      perror("ptrace syscall (Linux)");
-      break;
+      
+      // Check if it's an unlink syscall
+      if (regs.orig_rax == SYS_UNLINK) {
+        // Get the file path from the child's memory
+        char* path = read_string(child_pid, regs.rdi);
+        
+        // Check if this matches our protected file
+        if (strcmp(path, protected_file) == 0) {
+          printf("\n🔔 ALERT: Program is attempting to delete file: %s\n", path);
+          printf("Allow this operation? (y/n): ");
+          fflush(stdout);
+          
+          char response;
+          if (scanf(" %c", &response) != 1) {
+            response = 'n'; // Default to blocking if read fails
+          }
+          
+          if (response == 'y' || response == 'Y') {
+            printf("✅ ALLOWED: User permitted unlink operation\n");
+            // Allow the syscall to proceed normally
+          } else {
+            printf("🛡️ BLOCKED: User denied unlink operation\n");
+            
+            // Change the return value to EPERM (Operation not permitted)
+            regs.rax = -EPERM;
+            
+            if (ptrace(PTRACE_SETREGS, child_pid, NULL, &regs) == -1) {
+              perror("ptrace setregs");
+            }
+          }
+        }
+      }
+      
+      // Continue to the next syscall
+      if (ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL) == -1) {
+        perror("ptrace syscall");
+        break;
+      }
+    } else if (WIFSTOPPED(status)) {
+      // Forward any other signals to the child
+      int sig = WSTOPSIG(status);
+      
+      if (ptrace(PTRACE_SYSCALL, child_pid, NULL, sig) == -1) {
+        perror("ptrace syscall (signal forwarding)");
+        break;
+      }
     }
 #endif
   }
