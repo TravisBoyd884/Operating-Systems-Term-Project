@@ -7,22 +7,27 @@ project(Sandbox C)
 # Set the output directory for binaries during development
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
-# Detect the operating system
+# Detect the operating system and select the appropriate source file
 if(APPLE)
+  set(SANDBOX_SOURCE src/sandbox_macos.c)
   add_definitions(-DMACOS)
   message(STATUS "Configuring for macOS")
 elseif(UNIX AND NOT APPLE)
+  set(SANDBOX_SOURCE src/sandbox_linux.c)
   add_definitions(-DLINUX)
   message(STATUS "Configuring for Linux")
 elseif(WIN32)
+  set(SANDBOX_SOURCE src/sandbox_windows.c)
   add_definitions(-DWINDOWS)
   message(STATUS "Configuring for Windows")
 else()
   message(FATAL_ERROR "Unsupported platform. This project currently supports Linux, macOS, and Windows.")
 endif()
 
-# Create an executable from the source files
-add_executable(sandbox src/sandbox.c)
+# Create an executable from the platform-specific source file
+add_executable(sandbox ${SANDBOX_SOURCE})
+
+# Create the test executable
 add_executable(unlink_test src/malicious_program_unlink.c)
 
 # Installation configuration
