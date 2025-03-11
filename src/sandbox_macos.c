@@ -14,6 +14,7 @@
 #include <mach/thread_status.h>
 #include <mach/machine/thread_status.h>
 #include <libproc.h>
+#include "sandbox_common.h"
 
 // Define missing constants for macOS if needed
 #ifndef PT_TRACE_ME
@@ -30,6 +31,9 @@
 #endif
 
 // macOS syscall numbers
+#define SYS_READ 3
+#define SYS_WRITE 4
+#define SYS_OPEN 5
 #define SYS_UNLINK 10
 #define SYS_UNLINKAT 472
 #define MAX_PATH 4096
@@ -94,8 +98,8 @@ int main(int argc, char *argv[]) {
 
   char *program = argv[1];    // Program to run
   
-  printf("Sandbox monitoring: %s\n", program);
-  printf("All file deletion operations will be monitored\n");
+  printf("%sSandbox monitoring: %s%s\n", INFO_COLOR, program, COLOR_RESET);
+  printf("%sFile operations monitored: read, write, open, and delete%s\n", INFO_COLOR, COLOR_RESET);
 
   // Fork a child process
   pid_t child_pid = fork();
@@ -136,7 +140,7 @@ int main(int argc, char *argv[]) {
   // Get the process name for better output
   char* proc_name = get_process_name(child_pid);
   
-  printf("Starting to trace process '%s' with PID %d\n", proc_name, child_pid);
+  printf("%sStarting to trace process '%s' with PID %d%s\n", INFO_COLOR, proc_name, child_pid, COLOR_RESET);
   
   // Continue the child process
   if (ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0) == -1) {
@@ -181,14 +185,16 @@ int main(int argc, char *argv[]) {
         }
         
         if (potential_file) {
-          printf("\n🔔 ALERT: Process '%s' (PID %d) might be attempting to delete file: %s\n", 
-                proc_name, child_pid, potential_file);
+          printf("\n%s[!] ALERT: Process '%s' (PID %d) might be attempting file operations on: %s%s\n", 
+                ALERT_COLOR, proc_name, child_pid, potential_file, COLOR_RESET);
+          printf("%sThis may include read, write, open, or delete operations%s\n", ALERT_COLOR, COLOR_RESET);
         } else {
-          printf("\n🔔 ALERT: Process '%s' (PID %d) might be attempting a file operation\n", 
-                proc_name, child_pid);
+          printf("\n%s[!] ALERT: Process '%s' (PID %d) might be attempting file operations%s\n", 
+                ALERT_COLOR, proc_name, child_pid, COLOR_RESET);
+          printf("%sThis may include read, write, open, or delete operations%s\n", ALERT_COLOR, COLOR_RESET);
         }
         
-        printf("Allow this operation? (y/n): ");
+        printf("%sAllow this operation? (y/n): %s", PROMPT_COLOR, COLOR_RESET);
         fflush(stdout);
         
         char response;
@@ -201,18 +207,18 @@ int main(int argc, char *argv[]) {
         while ((c = getchar()) != '\n' && c != EOF);
         
         if (response == 'y' || response == 'Y') {
-          printf("✅ ALLOWED: User permitted file operation\n");
+          printf("%s[+] ALLOWED: User permitted file operation%s\n", ALLOWED_COLOR, COLOR_RESET);
           
           // Continue execution
           ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
         } else {
-          printf("🛡️ BLOCKED: User denied file operation\n");
+          printf("%s[-] BLOCKED: User denied file operation%s\n", BLOCKED_COLOR, COLOR_RESET);
           
           // Kill the process to prevent any file operations
-          printf("Terminating process to protect files...\n");
+          printf("%sTerminating process to protect files...%s\n", BLOCKED_COLOR, COLOR_RESET);
           ptrace(PT_KILL, child_pid, (caddr_t)0, 0);
           waitpid(child_pid, &status, 0);
-          printf("Process terminated successfully.\n");
+          printf("%sProcess terminated successfully.%s\n", BLOCKED_COLOR, COLOR_RESET);
           break;
         }
       } else if (sig != SIGSTOP) {

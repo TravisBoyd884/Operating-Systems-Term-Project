@@ -6,6 +6,7 @@
 #include <psapi.h>
 #include <tlhelp32.h>
 #include <io.h>
+#include "sandbox_common.h"
 
 #define F_OK 0
 #define access _access
@@ -66,8 +67,8 @@ int main(int argc, char *argv[]) {
 
   char *program = argv[1];    // Program to run
   
-  printf("Sandbox monitoring: %s\n", program);
-  printf("All file deletion operations will be monitored\n");
+  printf("%sSandbox monitoring: %s%s\n", INFO_COLOR, program, COLOR_RESET);
+  printf("%sFile operations monitored: read, write, open, and delete%s\n", INFO_COLOR, COLOR_RESET);
 
   // Windows implementation using CreateProcess
   STARTUPINFO si;
@@ -107,8 +108,8 @@ int main(int argc, char *argv[]) {
   // Get the process name for better output
   const char* proc_name = get_process_name(pi.hProcess);
   
-  printf("Process '%s' created with PID %lu, monitoring for file deletion operations...\n", 
-         proc_name, pi.dwProcessId);
+  printf("%sProcess '%s' created with PID %lu, monitoring for file operations...%s\n", 
+         INFO_COLOR, proc_name, pi.dwProcessId, COLOR_RESET);
   
   // Resume the process
   ResumeThread(pi.hThread);
@@ -146,14 +147,16 @@ int main(int argc, char *argv[]) {
     BOOL fileOperation = TRUE;
     
     if (potential_file) {
-      printf("\n🔔 ALERT: Process '%s' (PID %lu) is attempting to delete file: %s\n", 
-             proc_name, pi.dwProcessId, potential_file);
+      printf("\n%s[!] ALERT: Process '%s' (PID %lu) is attempting file operations on: %s%s\n", 
+             ALERT_COLOR, proc_name, pi.dwProcessId, potential_file, COLOR_RESET);
+      printf("%sThis may include read, write, open, or delete operations%s\n", ALERT_COLOR, COLOR_RESET);
     } else {
-      printf("\n🔔 ALERT: Process '%s' (PID %lu) might be attempting a file operation\n", 
-             proc_name, pi.dwProcessId);
+      printf("\n%s[!] ALERT: Process '%s' (PID %lu) might be attempting file operations%s\n", 
+             ALERT_COLOR, proc_name, pi.dwProcessId, COLOR_RESET);
+      printf("%sThis may include read, write, open, or delete operations%s\n", ALERT_COLOR, COLOR_RESET);
     }
     
-    printf("Allow this operation? (y/n): ");
+    printf("%sAllow this operation? (y/n): %s", PROMPT_COLOR, COLOR_RESET);
     fflush(stdout);
     
     char response;
@@ -166,14 +169,14 @@ int main(int argc, char *argv[]) {
     while ((c = getchar()) != '\n' && c != EOF);
     
     if (response == 'y' || response == 'Y') {
-      printf("✅ ALLOWED: User permitted file operation\n");
+      printf("%s[+] ALLOWED: User permitted file operation%s\n", ALLOWED_COLOR, COLOR_RESET);
       // In a real implementation, we would allow the operation to proceed
     } else {
-      printf("🛡️ BLOCKED: User denied file operation\n");
-      printf("Terminating process to prevent file deletion...\n");
+      printf("%s[-] BLOCKED: User denied file operation%s\n", BLOCKED_COLOR, COLOR_RESET);
+      printf("%sTerminating process to prevent file operations...%s\n", BLOCKED_COLOR, COLOR_RESET);
       TerminateProcess(pi.hProcess, 1);
       WaitForSingleObject(pi.hProcess, INFINITE);
-      printf("Process terminated successfully.\n");
+      printf("%sProcess terminated successfully.%s\n", BLOCKED_COLOR, COLOR_RESET);
       break;
     }
     

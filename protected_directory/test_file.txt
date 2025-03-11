@@ -1,0 +1,12 @@
+This is a test file that will be used to demonstrate 
+the file operations monitoring capabilities of the sandbox.
+
+The sandbox should intercept:
+1. Opening this file (open syscall)
+2. Reading from this file (read syscall)
+3. Writing to this file (write syscall)
+
+When you run the file_operations_test program under the sandbox,
+you should be prompted for each operation.
+
+This file has been modified by malicious_file_operations.c
