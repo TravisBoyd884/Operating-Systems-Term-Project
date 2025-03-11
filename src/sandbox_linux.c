@@ -11,6 +11,7 @@
 #include <sys/reg.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
+#include "sandbox_logger.h"  // Include the logging header
 
 // Linux x86_64 unlink syscall numbers
 #define SYS_UNLINK 87
@@ -77,11 +78,22 @@ int main(int argc, char *argv[]) {
   printf("Sandbox monitoring: %s\n", program);
   printf("All file deletion operations will be monitored\n");
 
+  // Initialize logging
+  if (!logger_init(program)) {
+    fprintf(stderr, "Warning: Could not initialize logging\n");
+  } else {
+    printf("Logging enabled: Check sandbox_%s_*.log for details\n", program);
+  }
+
+  logger_log(LOG_INFO, "Starting sandbox for program: %s", program);
+
   // Fork a child process
   pid_t child_pid = fork();
   
   if (child_pid == -1) {
     perror("fork failed");
+    logger_log(LOG_ERROR, "Fork failed: %s", strerror(errno));
+    logger_close();
     return 1;
   }
   
@@ -113,14 +125,19 @@ int main(int argc, char *argv[]) {
   if (ptrace(PTRACE_SETOPTIONS, child_pid, 0, 
              PTRACE_O_TRACESYSGOOD) == -1) {
     perror("ptrace setoptions");
+    logger_log(LOG_ERROR, "Failed to set ptrace options: %s", strerror(errno));
+    logger_close();
     return 1;
   }
   
   printf("Starting to trace process with PID %d\n", child_pid);
+  logger_log(LOG_INFO, "Tracing process with PID %d", child_pid);
   
   // Continue to the next syscall
   if (ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL) == -1) {
     perror("ptrace syscall");
+    logger_log(LOG_ERROR, "Failed to continue to syscall: %s", strerror(errno));
+    logger_close();
     return 1;
   }
   
@@ -129,18 +146,23 @@ int main(int argc, char *argv[]) {
     // Wait for the child to stop
     if (waitpid(child_pid, &status, 0) == -1) {
       perror("waitpid");
+      logger_log(LOG_ERROR, "Waitpid failed: %s", strerror(errno));
       break;
     }
     
     // Check if the child has exited
     if (WIFEXITED(status)) {
-      printf("Child process exited with status %d\n", WEXITSTATUS(status));
+      int exit_status = WEXITSTATUS(status);
+      printf("Child process exited with status %d\n", exit_status);
+      logger_log(LOG_INFO, "Child process exited with status %d", exit_status);
       break;
     }
     
     // Check if the child was terminated by a signal
     if (WIFSIGNALED(status)) {
-      printf("Child process terminated by signal %d\n", WTERMSIG(status));
+      int sig = WTERMSIG(status);
+      printf("Child process terminated by signal %d\n", sig);
+      logger_log(LOG_INFO, "Child process terminated by signal %d", sig);
       break;
     }
     
@@ -149,6 +171,7 @@ int main(int argc, char *argv[]) {
       // Get the registers to see what syscall was made
       if (ptrace(PTRACE_GETREGS, child_pid, NULL, &regs) == -1) {
         perror("ptrace getregs");
+        logger_log(LOG_ERROR, "Failed to get registers: %s", strerror(errno));
         break;
       }
       
@@ -164,11 +187,14 @@ int main(int argc, char *argv[]) {
           if (saved_syscall == SYS_UNLINK) {
             path = read_string(child_pid, regs.rdi);
             printf("\n🔔 ALERT: Program is attempting to delete file: %s\n", path);
+            logger_log(LOG_ALERT, "Program is attempting to delete file: %s", path);
           } else { // SYS_UNLINKAT
             int dirfd = (int)regs.rdi;
             path = read_string(child_pid, regs.rsi);
             printf("\n🔔 ALERT: Program is attempting to delete file: %s (dirfd: %d)\n", 
                    path, dirfd);
+            logger_log(LOG_ALERT, "Program is attempting to delete file: %s (dirfd: %d)", 
+                       path, dirfd);
           }
           
           printf("Allow this operation? (y/n): ");
@@ -185,14 +211,17 @@ int main(int argc, char *argv[]) {
           
           if (response == 'y' || response == 'Y') {
             printf("✅ ALLOWED: User permitted file deletion operation\n");
+            logger_log(LOG_INFO, "✅ ALLOWED: User permitted file deletion operation");
             // Allow the syscall to proceed normally
           } else {
             printf("🛡️ BLOCKED: User denied file deletion operation\n");
+            logger_log(LOG_WARNING, "🛡️ BLOCKED: User denied file deletion operation");
             
             // Set syscall to -1 to prevent it from executing
             regs.orig_rax = -1;
             if (ptrace(PTRACE_SETREGS, child_pid, NULL, &regs) == -1) {
               perror("ptrace setregs");
+              logger_log(LOG_ERROR, "Failed to set registers: %s", strerror(errno));
             }
           }
         }
@@ -206,6 +235,7 @@ int main(int argc, char *argv[]) {
           regs.rax = -EPERM;
           if (ptrace(PTRACE_SETREGS, child_pid, NULL, &regs) == -1) {
             perror("ptrace setregs for return value");
+            logger_log(LOG_ERROR, "Failed to set return value: %s", strerror(errno));
           }
         }
       }
@@ -213,9 +243,11 @@ int main(int argc, char *argv[]) {
       // Got a regular signal - forward it
       int sig = WSTOPSIG(status);
       printf("Child got signal: %d\n", sig);
+      logger_log(LOG_INFO, "Child got signal: %d", sig);
       
       if (ptrace(PTRACE_SYSCALL, child_pid, NULL, sig) == -1) {
         perror("ptrace syscall (signal forwarding)");
+        logger_log(LOG_ERROR, "Failed to forward signal: %s", strerror(errno));
         break;
       }
       continue;
@@ -224,9 +256,25 @@ int main(int argc, char *argv[]) {
     // Continue to the next syscall
     if (ptrace(PTRACE_SYSCALL, child_pid, NULL, NULL) == -1) {
       perror("ptrace syscall");
+      logger_log(LOG_ERROR, "Failed to continue to syscall: %s", strerror(errno));
       break;
     }
   }
+  
+  // Get statistics
+  int total, allowed, blocked;
+  logger_get_stats(&total, &allowed, &blocked);
+  
+  printf("\nSandbox monitoring completed.\n");
+  printf("Statistics: Total operations: %d, Allowed: %d, Blocked: %d\n", 
+         total, allowed, blocked);
+  
+  logger_log(LOG_INFO, "Sandbox monitoring completed.");
+  logger_log(LOG_INFO, "Statistics: Total operations: %d, Allowed: %d, Blocked: %d", 
+             total, allowed, blocked);
+  
+  // Close logging
+  logger_close();
   
   return 0;
 }

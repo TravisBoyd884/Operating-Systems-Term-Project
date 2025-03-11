@@ -1,0 +1,13 @@
+===========================================================
+Sandbox Monitoring Log - test_program
+Started: Mon Mar 10 23:43:20 2025
+===========================================================
+
+[23:43:20] [INFO ] Starting sandbox for program: ./test_program
+[23:43:20] [INFO ] Tracing process 'test_program' with PID 6040
+[23:43:20] [INFO ] Child process exited with status 0
+
+===========================================================
+Sandbox Monitoring Ended: Mon Mar 10 23:43:20 2025
+Statistics: Total operations: 0, Allowed: 0, Blocked: 0
+===========================================================
