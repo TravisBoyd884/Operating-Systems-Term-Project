@@ -14,6 +14,7 @@
 #include <mach/thread_status.h>
 #include <mach/machine/thread_status.h>
 #include <libproc.h>
+#include <sys/user.h>
 #include "sandbox_common.h"
 
 // Define missing constants for macOS if needed
@@ -148,6 +149,9 @@ int main(int argc, char *argv[]) {
     return 1;
   }
   
+  // Set a trap for the first instruction to catch syscalls
+  ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
+
   // Monitor the child process
   while (1) {
     // Wait for the child to stop
@@ -165,62 +169,103 @@ int main(int argc, char *argv[]) {
       break;
     }
     
-    // On macOS, we need to be more careful about how we detect and handle unlink operations
     if (WIFSTOPPED(status)) {
       int sig = WSTOPSIG(status);
       
-      // If we get a trap signal, this could be an unlink
       if (sig == SIGTRAP) {
-        // In macOS, we can't easily determine which syscall is being made with just ptrace
-        // But we can provide context about what's happening
+        // Get the thread state to access registers
+        x86_thread_state64_t thread_state;
+        mach_msg_type_number_t thread_state_count = x86_THREAD_STATE64_COUNT;
+        thread_act_t thread;
+        task_t task;
         
-        // Check if any of the command line arguments are files that exist
-        // This is a heuristic - if one of the arguments is a file, we show that
-        char* potential_file = NULL;
-        for (int i = 2; i < argc; i++) {
-          if (file_exists(argv[i])) {
-            potential_file = argv[i];
+        task_for_pid(mach_task_self(), child_pid, &task);
+        thread_act_port_array_t thread_list;
+        mach_msg_type_number_t thread_count;
+        
+        task_threads(task, &thread_list, &thread_count);
+        thread = thread_list[0];  // Get the first thread
+        
+        thread_get_state(thread, x86_THREAD_STATE64, (thread_state_t)&thread_state, &thread_state_count);
+        
+        // Get syscall number from rax register
+        uint64_t syscall_num = thread_state.__rax;
+        uint64_t arg1 = thread_state.__rdi;  // First argument (often a file path or descriptor)
+        
+        // Check for file-related syscalls
+        char* operation_type = NULL;
+        char* filepath = NULL;
+        int is_file_operation = FALSE;
+        
+        switch (syscall_num) {
+          case SYS_OPEN:
+            operation_type = "open";
+            filepath = read_string(child_pid, arg1);
+            is_file_operation = TRUE;
+            break;
+          case SYS_READ:
+            operation_type = "read";
+            is_file_operation = TRUE;
+            break;
+          case SYS_WRITE:
+            operation_type = "write";
+            is_file_operation = TRUE;
+            break;
+          case SYS_UNLINK:
+            operation_type = "delete";
+            filepath = read_string(child_pid, arg1);
+            is_file_operation = TRUE;
+            break;
+          case SYS_UNLINKAT:
+            operation_type = "delete";
+            filepath = read_string(child_pid, thread_state.__rsi);  // Second argument for unlinkat
+            is_file_operation = TRUE;
+            break;
+        }
+        
+        if (is_file_operation) {
+          if (filepath) {
+            printf("\n%s[!] ALERT: Process '%s' (PID %d) attempting %s operation on: %s%s\n", 
+                  ALERT_COLOR, proc_name, child_pid, operation_type, filepath, COLOR_RESET);
+          } else {
+            printf("\n%s[!] ALERT: Process '%s' (PID %d) attempting %s operation%s\n", 
+                  ALERT_COLOR, proc_name, child_pid, operation_type, COLOR_RESET);
+          }
+          
+          printf("%sAllow this operation? (y/n): %s", PROMPT_COLOR, COLOR_RESET);
+          fflush(stdout);
+          
+          char response;
+          if (scanf(" %c", &response) != 1) {
+            response = 'n'; // Default to blocking if read fails
+          }
+          
+          // Clear any remaining characters in the input buffer
+          int c;
+          while ((c = getchar()) != '\n' && c != EOF);
+          
+          if (response == 'y' || response == 'Y') {
+            printf("%s[+] ALLOWED: User permitted %s operation%s\n", ALLOWED_COLOR, operation_type, COLOR_RESET);
+            
+            // Continue execution
+            ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
+          } else {
+            printf("%s[-] BLOCKED: User denied %s operation%s\n", BLOCKED_COLOR, operation_type, COLOR_RESET);
+            
+            // Kill the process to prevent any file operations
+            printf("%sTerminating process to protect files...%s\n", BLOCKED_COLOR, COLOR_RESET);
+            ptrace(PT_KILL, child_pid, (caddr_t)0, 0);
+            waitpid(child_pid, &status, 0);
+            printf("%sProcess terminated successfully.%s\n", BLOCKED_COLOR, COLOR_RESET);
             break;
           }
-        }
-        
-        if (potential_file) {
-          printf("\n%s[!] ALERT: Process '%s' (PID %d) might be attempting file operations on: %s%s\n", 
-                ALERT_COLOR, proc_name, child_pid, potential_file, COLOR_RESET);
-          printf("%sThis may include read, write, open, or delete operations%s\n", ALERT_COLOR, COLOR_RESET);
         } else {
-          printf("\n%s[!] ALERT: Process '%s' (PID %d) might be attempting file operations%s\n", 
-                ALERT_COLOR, proc_name, child_pid, COLOR_RESET);
-          printf("%sThis may include read, write, open, or delete operations%s\n", ALERT_COLOR, COLOR_RESET);
-        }
-        
-        printf("%sAllow this operation? (y/n): %s", PROMPT_COLOR, COLOR_RESET);
-        fflush(stdout);
-        
-        char response;
-        if (scanf(" %c", &response) != 1) {
-          response = 'n'; // Default to blocking if read fails
-        }
-        
-        // Clear any remaining characters in the input buffer
-        int c;
-        while ((c = getchar()) != '\n' && c != EOF);
-        
-        if (response == 'y' || response == 'Y') {
-          printf("%s[+] ALLOWED: User permitted file operation%s\n", ALLOWED_COLOR, COLOR_RESET);
-          
-          // Continue execution
+          // Continue for non-file operations
           ptrace(PT_CONTINUE, child_pid, (caddr_t)1, 0);
-        } else {
-          printf("%s[-] BLOCKED: User denied file operation%s\n", BLOCKED_COLOR, COLOR_RESET);
-          
-          // Kill the process to prevent any file operations
-          printf("%sTerminating process to protect files...%s\n", BLOCKED_COLOR, COLOR_RESET);
-          ptrace(PT_KILL, child_pid, (caddr_t)0, 0);
-          waitpid(child_pid, &status, 0);
-          printf("%sProcess terminated successfully.%s\n", BLOCKED_COLOR, COLOR_RESET);
-          break;
         }
+        
+        // Cleanup
+        vm_deallocate(mach_task_self(), (vm_address_t)thread_list, thread_count * sizeof(thread_act_t));
       } else if (sig != SIGSTOP) {
         // Forward any other signals to the child
         ptrace(PT_CONTINUE, child_pid, (caddr_t)1, sig);
